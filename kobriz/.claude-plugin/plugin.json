@@ -1,0 +1,18 @@
+{
+  "name": "kobriz",
+  "displayName": "Kobriz ADLC",
+  "version": "0.1.0",
+  "description": "Agentic Development Life Cycle orchestrator: a manager agent discovers tasks from your existing task system (MCP or REST), assigns specialized backend/frontend developer agents, runs each task in an isolated git worktree, validates and merges through a controlled process, and syncs status back.",
+  "author": {
+    "name": "Kobriz ADLC"
+  },
+  "keywords": [
+    "adlc",
+    "orchestration",
+    "git-worktree",
+    "multi-agent",
+    "task-automation",
+    "code-review"
+  ],
+  "license": "MIT"
+}

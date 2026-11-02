@@ -1,0 +1,13 @@
+{
+  "name": "kobriz-local",
+  "owner": {
+    "name": "Kobriz ADLC"
+  },
+  "plugins": [
+    {
+      "name": "kobriz",
+      "source": "./kobriz",
+      "description": "Agentic Development Life Cycle orchestrator — discovers tasks from your existing MCP/REST ticket system, runs them in isolated git worktrees via specialized agents, validates, and merges through a controlled process."
+    }
+  ]
+}

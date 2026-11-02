@@ -1,0 +1,15 @@
+# Local env / secrets — never commit real values
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# kobriz persisted config (contains secrets — never commit)
+.kobriz/
+
+# kobriz worktree state (lives under ADLC_WORKTREE_ROOT by default, but ignore if nested)
+.kobriz-state.json
+*-kobriz-worktrees/

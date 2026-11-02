@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/check-config.sh\"",
+            "timeout": 20,
+            "statusMessage": "kobriz: validating ADLC configuration"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/guard-git.sh\"",
+            "timeout": 15,
+            "statusMessage": "kobriz: checking git safety"
+          }
+        ]
+      }
+    ]
+  }
+}
