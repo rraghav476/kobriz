@@ -22,6 +22,7 @@ import os
 import re
 import stat
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # Keys whose values must never appear in logs, prompts or task comments.
@@ -38,6 +39,41 @@ LIFECYCLE_STATES = [
 ]
 FAILURE_STATES = ["BLOCKED", "FAILED", "NEEDS_REWORK", "MERGE_CONFLICT", "CANCELLED"]
 ALL_STATES = LIFECYCLE_STATES + FAILURE_STATES
+
+PROVIDERS = ("generic", "clickup", "jira")
+APPROVALS_BY_MODE = {"both": ["session", "provider"], "session": ["session"],
+                     "provider": ["provider"]}
+PLAN_APPROVAL_MODES = tuple(APPROVALS_BY_MODE)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def atomic_write_json(path: str, data: Any) -> None:
+    """Write JSON via a temp file + rename so a crash never leaves a half-written file."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def ensure_kobriz_dir(path: str) -> str:
+    """Create a ``.kobriz`` folder that git-ignores itself (it holds secrets and plans)."""
+    os.makedirs(path, exist_ok=True)
+    ignore = os.path.join(path, ".gitignore")
+    if not os.path.exists(ignore):
+        with open(ignore, "w", encoding="utf-8") as fh:
+            fh.write("*\n")
+    return path
+
+
+def kobriz_dir(config: "Config", repo: Optional[str] = None) -> str:
+    """``<repo>/.kobriz`` for plans and the intake ledger."""
+    if repo is None:
+        import gitutil
+        repo = gitutil.repo_root(config.repository_root or os.getcwd())
+    return ensure_kobriz_dir(os.path.join(repo, ".kobriz"))
 
 _BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
@@ -67,7 +103,14 @@ def find_config_file() -> Optional[str]:
 
 
 def default_config_path(scope: str = "project") -> str:
-    """Where ``/kobriz:setup`` writes config. scope = 'project' | 'user'."""
+    """Where ``/kobriz:setup`` writes config. scope = 'project' | 'user'.
+
+    ``ADLC_CONFIG_FILE`` wins for project scope, matching the read order in
+    :func:`candidate_config_paths`, so a save is never shadowed by the file it should replace.
+    """
+    explicit = os.environ.get("ADLC_CONFIG_FILE")
+    if scope == "project" and explicit:
+        return os.path.expanduser(explicit)
     if scope == "user":
         return os.path.expanduser(os.path.join("~", ".claude", "kobriz", "config.json"))
     project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
@@ -106,7 +149,11 @@ def save_config_file(values: Dict[str, Any], scope: str = "project",
                      path: Optional[str] = None) -> str:
     """Merge ``values`` into the config file and write it with 0600 perms. Returns path."""
     target = path or default_config_path(scope)
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    folder = os.path.dirname(target)
+    if os.path.basename(folder) == ".kobriz":
+        ensure_kobriz_dir(folder)
+    else:
+        os.makedirs(folder, exist_ok=True)
     existing: Dict[str, Any] = {}
     if os.path.isfile(target):
         try:
@@ -115,10 +162,7 @@ def save_config_file(values: Dict[str, Any], scope: str = "project",
         except (json.JSONDecodeError, OSError):
             existing = {}
     existing.update({k: v for k, v in values.items() if v is not None})
-    tmp = target + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(existing, fh, indent=2, sort_keys=True)
-    os.replace(tmp, target)
+    atomic_write_json(target, existing)
     try:
         os.chmod(target, stat.S_IRUSR | stat.S_IWUSR)  # 0600 — secrets stay owner-only
     except OSError:
@@ -185,8 +229,15 @@ class Config:
     # Which project/board within the ticket system to pull tickets from. A provider (Jira,
     # etc.) can host many projects; this scopes discovery to one. e.g. a Jira project key.
     task_project: Optional[str] = None
+    task_workspace: Optional[str] = None           # e.g. ClickUp workspace id when the user has several
     # --- MCP provider settings ---
     mcp_server: Optional[str] = None               # expected MCP server name (for docs/validation)
+    provider: str = "generic"                      # generic | clickup | jira (selects the recipe)
+    # --- Plan approval ---
+    require_plan_approval: bool = True             # gate worktree create + merge on an approved plan
+    plan_approval: str = "both"                    # both | session | provider
+    plan_review_status: Optional[str] = None       # provider status meaning "plan awaiting review"
+    plan_approved_status: Optional[str] = None     # provider status only a human may set
     # --- Git / worktree settings ---
     repository_root: Optional[str] = None
     base_branch: str = "main"
@@ -249,7 +300,15 @@ class Config:
             field_map=_json_map("ADLC_TASK_FIELD_MAP_JSON"),
             status_map=_json_map("ADLC_TASK_STATUS_MAP_JSON"),
             task_project=_env("ADLC_TASK_PROJECT"),
+            task_workspace=_env("ADLC_TASK_WORKSPACE"),
             mcp_server=_env("ADLC_MCP_SERVER"),
+            provider=(_env("ADLC_TASK_PROVIDER", "generic") or "generic").lower(),
+            # Fails closed: only an explicit false-like value switches the gate off.
+            require_plan_approval=(_env("ADLC_REQUIRE_PLAN_APPROVAL") or "true").lower()
+            not in ("0", "false", "no", "off"),
+            plan_approval=(_env("ADLC_PLAN_APPROVAL", "both") or "both").lower(),
+            plan_review_status=_env("ADLC_PLAN_REVIEW_STATUS"),
+            plan_approved_status=_env("ADLC_PLAN_APPROVED_STATUS"),
             repository_root=_env("ADLC_REPOSITORY_ROOT") or os.getcwd(),
             base_branch=_env("ADLC_BASE_BRANCH", "main") or "main",
             worktree_root=_env("ADLC_WORKTREE_ROOT"),
@@ -323,7 +382,24 @@ class Config:
         if self.auto_retries < 0:
             errors.append("ADLC_AUTO_RETRIES must be >= 0")
 
+        if self.provider not in PROVIDERS:
+            errors.append(f"ADLC_TASK_PROVIDER must be one of: {', '.join(PROVIDERS)}")
+
+        if self.plan_approval not in PLAN_APPROVAL_MODES:
+            errors.append(f"ADLC_PLAN_APPROVAL must be one of: {', '.join(PLAN_APPROVAL_MODES)}")
+        elif (self.require_plan_approval and "provider" in self.required_approvals()
+              and not self.plan_approved_status):
+            errors.append(
+                "ADLC_PLAN_APPROVED_STATUS is required when ADLC_PLAN_APPROVAL is "
+                f"'{self.plan_approval}' (the tracker status a human sets to approve a plan)"
+            )
+
         return errors
+
+    def required_approvals(self) -> List[str]:
+        """Approval kinds a plan needs before it can run, per ADLC_PLAN_APPROVAL."""
+        # An unknown mode (rejected by validate) fails closed to the strictest one.
+        return APPROVALS_BY_MODE.get(self.plan_approval, APPROVALS_BY_MODE["both"])
 
     def redacted(self) -> Dict[str, Any]:
         """Return the config as a dict with all secret-looking values masked."""

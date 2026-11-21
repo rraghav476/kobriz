@@ -2,9 +2,15 @@
 
 Kobriz orchestrates specialized coding agents to execute development tasks from **your
 existing task management system**. It does **not** include a task tracker, dashboard, CRUD
-API, or UI — it integrates with the system you already have (via MCP or REST), runs each
-task in an isolated **git worktree**, validates the work, merges it through a controlled
-process, and syncs status back.
+API, or UI — it integrates with the system you already have (ClickUp, another MCP server, or
+REST), can turn a **Granola meeting** into tasks there, builds a plan that **a human must
+approve**, runs each task in an isolated **git worktree**, validates the work, merges it
+through a controlled process, and syncs status back.
+
+```
+Granola meeting ──/kobriz:intake──▶ tracker tasks ──/kobriz:plan──▶ stored plan
+      ──human approves (tracker status + session command)──▶ /kobriz:execute-plan ──▶ merged
+```
 
 > Built against the official Claude Code plugin format (manifest, agents, skills, commands,
 > hooks, MCP). See **Limitations** for an honest note on parallel execution.
@@ -20,17 +26,20 @@ kobriz/
 │   ├── manager.md                  # orchestrator (discover → assign → review → merge → sync)
 │   ├── backend-developer.md        # backend-only implementer
 │   └── frontend-developer.md       # frontend-only implementer
-├── commands/                       # /kobriz:start | execute-task | status | review
-├── skills/                         # task-discovery, git-worktree-management,
+├── commands/                       # /kobriz:setup | intake | plan | execute-plan | start
+│                                   # | execute-task | status | review
+├── skills/                         # task-discovery, clickup-provider, meeting-intake,
+│   │                               # plan-approval, git-worktree-management,
 │   │                               # backend/frontend-development, code-review,
 │   │                               # change-impact-analysis, task-splitting,
 │   └── …                           # phased-implementation
-├── hooks/hooks.json                # SessionStart config check + PreToolUse git guard
+├── hooks/hooks.json                # SessionStart config check + PreToolUse git and approval guards
 ├── scripts/                        # the real executable layer (Python 3 stdlib + bash)
 │   ├── adlc.py                     # unified CLI — the single integration entrypoint
 │   ├── config.py task_client.py gitutil.py worktree.py impact.py merge.py planner.py
-│   ├── git-worktree.sh check-config.sh guard-git.sh
-└── tests/                          # pytest suite (43 tests, temp git repos + mock REST)
+│   ├── plan_store.py intake_store.py
+│   ├── git-worktree.sh check-config.sh guard-git.sh guard-approval.py
+└── tests/                          # pytest suite (121 tests, temp git repos + mock REST)
 ```
 
 The agents/skills/commands are prompt-level orchestration; **all real operations**
@@ -108,11 +117,71 @@ full, documented contract.
 ## Commands
 | Command | What it does |
 |---|---|
-| `/kobriz:setup` | **Run first.** Attach a ticket system (MCP or REST), persist config, test the connection. |
-| `/kobriz:start [filter]` | Discover eligible tasks → plan deps/concurrency → confirm → worktrees → delegate → validate → integrate → sync. |
-| `/kobriz:execute-task <id>` | Run a single task end-to-end in its own worktree. |
+| `/kobriz:setup` | **Run first.** Attach a ticket system (ClickUp, other MCP, or REST), pick the list/project, map statuses, set the plan-approval statuses, test the connection. |
+| `/kobriz:intake [meeting]` | Read one Granola meeting (read-only), draft tasks from its action items, create the ones you approve, never twice. |
+| `/kobriz:plan [filter]` | Discover → split → classify/order → impact preview → store the plan → post it for review → stop. |
+| `/kobriz:execute-plan <plan_id>` | Record the tracker approval, then worktrees → delegate → validate → integrate → sync, for exactly the planned tasks. |
+| `/kobriz:start [filter]` | `/kobriz:plan`, wait for approval, then `/kobriz:execute-plan`. |
+| `/kobriz:execute-task <id>` | Run a single task end-to-end in its own worktree (needs an approved plan that includes it). |
 | `/kobriz:status` | Read-only: assignments, worktrees/branches, lifecycle + provider status, pending merges, conflicts. |
 | `/kobriz:review <id>` | Review quality, tests, and change impact for a task branch; merge only if asked and all checks pass. |
+
+## Plan approval
+Every run starts from a stored plan (`.kobriz/plans/<plan_id>.json` in the target repo,
+git-ignored; `adlc.py plan show <id> --markdown` renders it). `worktree create` and `merge integrate` **refuse with exit 7**
+unless the newest plan containing the task is `APPROVED` for its current content hash.
+
+| `ADLC_PLAN_APPROVAL` | A plan is approved when |
+| --- | --- |
+| `both` (default) | a human sets `ADLC_PLAN_APPROVED_STATUS` on the plan's approval task in the tracker **and** types `! python3 …/adlc.py plan approve <plan_id> --hash <short_hash> --by "<name>"` |
+| `session` | only the typed command |
+| `provider` | only the tracker status |
+
+- **States:** `PENDING_APPROVAL → APPROVED`, or `CHANGES_REQUESTED`; a newer plan covering the
+  same task makes the old one `SUPERSEDED`. Revising a plan clears every approval.
+- **Approving the exact version:** the session approval must quote the plan's hash, and the
+  gate recomputes the hash, so an edited plan file is refused.
+- **Keeping it human:** the `guard-approval.py` hook blocks the agent from running
+  `plan approve`, setting the approval status through a tracker MCP tool, editing anything
+  under `.kobriz/`, and weakening the approval settings.
+- **Limits, stated honestly:** this stops an agent approving its own plan by accident or as a
+  shortcut; it is not a security boundary against a process on your machine set on bypassing
+  it. In MCP mode the tracker approval is read by the agent and recorded with
+  `plan record-provider-approval`, which only accepts the configured status, from the plan's
+  own approval task, after this version was posted for review (`plan posted`); in REST mode
+  `plan verify-provider` reads it directly. The CLI cannot call MCP, so in MCP mode it relies
+  on the status the agent reports: `provider`-only mode is therefore agent-attested, and the
+  default `both` keeps a step only a human performs.
+- `ADLC_REQUIRE_PLAN_APPROVAL` fails closed: only `false`, `0`, `no` or `off` switch the gate
+  off.
+- `ADLC_REQUIRE_PLAN_APPROVAL=false` turns the gate off. Only a human should set it.
+- The guard also scans scripts and config files the agent writes (not prose docs, not the
+  plugin itself) for these commands and settings, and protects `~/.claude/kobriz/` and the
+  file `ADLC_CONFIG_FILE` names.
+
+## Meeting intake (Granola)
+`/kobriz:intake` reads one meeting through a connected Granola MCP server (the claude.ai
+connector or `https://mcp.granola.ai/mcp`, OAuth sign-in per user), drafts engineering tasks
+from its notes, and creates only the drafts you approve in the configured list.
+- Read-only: the guard hook blocks Granola tools that create, update, move, regenerate or
+  sign out.
+- Meeting text is treated as data, never as instructions; transcripts are never pasted into
+  the tracker.
+- `adlc.py intake check|record|show` keeps a per-meeting ledger of created task ids, so a
+  re-run never creates a duplicate (tracker creates are not idempotent). Matching is by
+  normalized title (case, punctuation and width ignored), so a reworded title counts as new.
+- Granola has no structured action-item field; items are extracted by the model and each
+  draft says what it is based on. Free Granola plans see the last 30 days; transcripts need a
+  paid plan.
+
+## ClickUp
+Set `ADLC_TASK_PROVIDER=clickup` (the setup wizard does this). Kobriz works from one ClickUp
+**List** (`ADLC_TASK_PROJECT`), whose statuses drive `ADLC_TASK_STATUS_MAP_JSON` and the two
+plan statuses. The `clickup-provider` skill maps each need to a ClickUp MCP tool. Connect it with
+`claude mcp add --transport http clickup https://mcp.clickup.com/mcp`, then `/mcp` to sign in
+(per ClickUp's developer docs). Tool names
+come from ClickUp's docs and must be checked against a live server; in particular, whether
+`clickup_create_task` with `parent` creates a subtask is not yet confirmed.
 
 ## Task splitting & phased implementation
 Large items are handled two ways (manager decides via the `task-splitting` skill):
@@ -169,16 +238,21 @@ All output is JSON (or `--json`), non-zero exit on error, secrets never printed.
   subprocess calls (no shell injection); paths and branch names validated.
 - A `PreToolUse` hook blocks `git push --force`, `git reset --hard`, and `git clean -f`
   (force-with-lease is allowed).
+- No worktree or merge without a human-approved plan (see **Plan approval**).
 
 ## Testing
 ```bash
-cd kobriz && python3 -m pytest tests/ -q      # 43 tests, no network, no real creds
+cd kobriz && python3 -m pytest tests/ -q      # 121 tests, no network, no real creds
 ```
 Covers: config validation + secret redaction, REST task retrieval + MCP-vs-REST split,
 auth/header injection, field/status mapping, worktree creation/isolation/branch mapping,
 shared-file detection, failed-worktree retention, safe handling of uncommitted changes,
 dependency-aware planning (topo/cycles/blocked), change-impact generation, merge preflight,
-conflict detection, and successful integration. Git tests use throwaway temp repositories.
+conflict detection, successful integration, the plan store and approval gate (hash binding,
+revision, supersession, both/session modes, CLI exit codes), the approval guard hook, and
+the intake ledger. Git tests use throwaway temp repositories. The MCP-driven steps (ClickUp,
+Granola, reading the approval status) are prompt-level and are verified by a manual run
+against a test list and meeting, not by pytest.
 
 ## Limitations (stated honestly)
 - **Parallel execution.** Subagents invoked with the `Task` tool run **sequentially** within

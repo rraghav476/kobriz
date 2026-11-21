@@ -50,4 +50,16 @@ def base_env(temp_repo, tmp_path, monkeypatch):
     monkeypatch.setenv("ADLC_BASE_BRANCH", "main")
     monkeypatch.setenv("ADLC_WORKTREE_ROOT", str(tmp_path / "worktrees"))
     monkeypatch.setenv("ADLC_MAX_CONCURRENCY", "2")
+    # Pre-existing worktree/merge tests exercise git mechanics, not the approval gate.
+    monkeypatch.setenv("ADLC_REQUIRE_PLAN_APPROVAL", "false")
     return temp_repo
+
+
+@pytest.fixture
+def gated_env(base_env, monkeypatch):
+    """base_env with the plan-approval gate on, requiring session + provider approval."""
+    monkeypatch.setenv("ADLC_REQUIRE_PLAN_APPROVAL", "true")
+    monkeypatch.setenv("ADLC_PLAN_APPROVAL", "both")
+    monkeypatch.setenv("ADLC_PLAN_REVIEW_STATUS", "plan review")
+    monkeypatch.setenv("ADLC_PLAN_APPROVED_STATUS", "Plan Approved")
+    return base_env

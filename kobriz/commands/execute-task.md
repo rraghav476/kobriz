@@ -14,6 +14,9 @@ The manager must:
 2. Fetch the task from the existing system (MCP tools, or `adlc.py tasks get $1` in REST
    mode) including full details and acceptance criteria.
 3. Classify it (backend / frontend / coordinated) and pick the developer agent.
+3.5. **Plan approval.** Run `adlc.py plan check $1`. If it exits 7, build a one-task plan with
+   its impact preview and get it approved with the `plan-approval` skill, then stop until the
+   user has approved. A single task is gated the same way as a batch.
 4. Create the worktree:
    `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/adlc.py worktree create $1 <slug> --kind <kind> --agent <agent>`
    and set status to IN_PROGRESS in the provider.
