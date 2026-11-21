@@ -15,7 +15,8 @@ from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional
 
 import gitutil
-from config import Config
+from config import Config, atomic_write_json
+from plan_store import require_approved
 
 _STATE_FILENAME = ".kobriz-state.json"
 
@@ -58,10 +59,7 @@ class WorktreeManager:
 
     def _save_state(self, state: Dict[str, dict]) -> None:
         os.makedirs(self.worktree_root, exist_ok=True)
-        tmp = self._state_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2, sort_keys=True)
-        os.replace(tmp, self._state_path)
+        atomic_write_json(self._state_path, state)
 
     def records(self) -> List[WorktreeRecord]:
         return [WorktreeRecord(**v) for v in self._load_state().values()]
@@ -92,10 +90,13 @@ class WorktreeManager:
                owner_agent: Optional[str] = None, base_branch: Optional[str] = None) -> WorktreeRecord:
         """Create an isolated worktree + feature branch for a task.
 
-        Safety: refuses to touch the main checkout's uncommitted changes (it operates
-        in a *separate* worktree); refuses to reuse an existing task worktree.
+        Safety: refuses unless an approved plan covers the task (when
+        ADLC_REQUIRE_PLAN_APPROVAL is on); refuses to touch the main checkout's uncommitted
+        changes (it operates in a *separate* worktree); refuses to reuse an existing task
+        worktree.
         """
         task_id = str(task_id)
+        require_approved(self.config, task_id, repo=self.repo)
         existing = self.get(task_id)
         if existing and os.path.isdir(existing.path):
             raise gitutil.GitError(

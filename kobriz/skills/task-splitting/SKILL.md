@@ -67,7 +67,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/adlc.py tasks create-subtask <PARENT_ID> \
   --title "<child title>" --description "<criteria>" --kind <backend|frontend> --confirm
 ```
 MCP mode: use the provider's own "create issue / create subtask" MCP tool (discover it; set
-the parent link per its schema). Same approval gate applies — do not call the create tool
+the parent link per its schema — for ClickUp see the `clickup-provider` skill). Same approval gate applies — do not call the create tool
 until the user has approved.
 
 Requires provider support: a subtask/create endpoint (`ADLC_TASK_SUBTASK_PATH`, default =
@@ -77,8 +77,9 @@ endpoint.
 
 ### 6. After creating subtasks
 - Report each created child id and link back to the parent.
-- Feed the new subtasks into the normal plan (`adlc.py plan` / dependency scheduling) and
-  execute each in its own worktree. Execute each child with `phased-implementation` if it is
+- Feed the new subtasks into the plan. If a plan is already stored, revise it
+  (`adlc.py plan revise`) so the subtasks are listed — this clears its approvals and the user
+  must approve the new version (`plan-approval` skill) before any subtask runs. Execute each child with `phased-implementation` if it is
   itself large.
 - Keep the parent story updated (status/comment) as children complete, using the provider's
   supported fields only.

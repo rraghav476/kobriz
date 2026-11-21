@@ -100,3 +100,21 @@ def test_find_config_file(clean_env):
     assert find_config_file() is None
     save_config_file({"ADLC_BASE_BRANCH": "main"}, path=clean_env)
     assert find_config_file() == clean_env
+
+
+def test_save_honours_adlc_config_file(tmp_path, monkeypatch):
+    from config import save_config_file, Config
+    target = tmp_path / "custom" / "cfg.json"
+    monkeypatch.setenv("ADLC_CONFIG_FILE", str(target))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "proj"))
+    path = save_config_file({"ADLC_TASK_SOURCE_TYPE": "mcp", "ADLC_MCP_SERVER": "clickup"})
+    assert path == str(target)
+    assert Config.load().mcp_server == "clickup"
+
+
+def test_project_config_folder_is_git_ignored(tmp_path, monkeypatch):
+    from config import save_config_file
+    monkeypatch.delenv("ADLC_CONFIG_FILE", raising=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    save_config_file({"ADLC_MCP_SERVER": "x"})
+    assert (tmp_path / ".kobriz" / ".gitignore").read_text() == "*\n"

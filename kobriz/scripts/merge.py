@@ -14,6 +14,7 @@ from typing import List, Optional
 
 import gitutil
 from config import Config
+from plan_store import require_approved
 from worktree import WorktreeManager
 
 
@@ -145,13 +146,15 @@ class Integrator:
                   confirm: bool = False) -> MergeResult:
         """Merge the task branch into the target branch after preflight passes.
 
-        Mutating. Requires ``confirm=True`` OR ``config.auto_merge``. Never force-pushes.
+        Mutating. Requires ``confirm=True`` OR ``config.auto_merge``, and an approved plan
+        covering the task when ADLC_REQUIRE_PLAN_APPROVAL is on. Never force-pushes.
         Merges into a dedicated integration checkout, not the user's main working tree.
         """
         if not (confirm or self.config.auto_merge):
             raise gitutil.GitError(
                 "Refusing to merge: pass confirm=True or set ADLC_AUTO_MERGE=true"
             )
+        require_approved(self.config, task_id, repo=self.repo)
         record = self.manager.get(task_id)
         if not record:
             raise gitutil.GitError(f"No worktree record for task {task_id}")

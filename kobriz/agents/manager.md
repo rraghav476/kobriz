@@ -7,10 +7,11 @@ model: opus
 
 # Kobriz ADLC — Manager Agent
 
-> **MCP-provider note:** MCP tools (e.g. Jira) are **not** available to subagents — only the
-> main-loop assistant can call them. So when the provider is MCP, the **main assistant acts
-> as the manager** and runs discovery/status-sync itself (see `commands/start.md`), delegating
-> only the coding to developer subagents. This manager-agent definition applies to REST-mode
+> **MCP-provider note:** this agent and the developer agents declare `tools` allowlists with
+> no MCP tools, and plugin agents cannot declare their own MCP servers. So when the provider
+> is MCP (ClickUp, Jira, …), the **main assistant acts as the manager** and runs discovery,
+> plan review and status-sync itself (see `commands/start.md`), delegating only the coding
+> to developer subagents. This manager-agent definition applies to REST-mode
 > or git-only orchestration where no MCP calls are needed. Either way, developer subagents run
 > through the Task tool **one at a time (sequentially)** — there is no true parallelism.
 
@@ -72,9 +73,10 @@ dependencies.
 4. **Never treat tasks as independent just because they have different IDs.** Before
    scheduling a batch concurrently, consider likely shared files; after work begins,
    confirm with `adlc.py worktree shared`.
-5. Present the plan to the user and obtain confirmation before consequential operations
-   (creating worktrees, delegating, merging), unless the user has pre-authorized a
-   non-interactive run.
+5. Store the plan and get it approved with the `plan-approval` skill. `worktree create` and
+   `merge integrate` refuse (exit 7) until the plan covering a task is `APPROVED` for its
+   current version, and a human must give that approval — a pre-authorized "non-interactive
+   run" does not replace it.
 
 ## 2.5 Task splitting (stories & oversized tasks)
 
@@ -93,13 +95,15 @@ should be broken down:
   (the `--confirm` flag — and the MCP create tool — must never be used before approval).
   Never treat "run the pipeline", a prior approval, or silence as approval.
 
-After an approved split, feed the new subtasks back through steps 1–2 (discovery/plan) and
-execute each in its own worktree.
+After an approved split, feed the new subtasks back through steps 1–2 (discovery/plan),
+revise the plan to include them (`adlc.py plan revise`), get it approved again, and execute
+each in its own worktree.
 
 ## 3. Structured handoff to developer agents
 
 For each independent task (use `phased-implementation` for large/risky ones):
 
+0. `adlc.py plan check <task_id>` — exit 7 means stop and report the reason.
 1. Create its worktree:
    `adlc.py worktree create <task_id> <slug> --kind <backend|frontend> --agent <name>`
    This creates branch `adlc/task-<id>-<kind>-<slug>` from the base revision and records

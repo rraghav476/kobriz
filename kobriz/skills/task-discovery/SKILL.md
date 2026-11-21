@@ -9,16 +9,25 @@ The existing task system is the **source of truth**. Never create a parallel tas
 The integration mode is set by `ADLC_TASK_SOURCE_TYPE` (`mcp` | `rest`).
 
 **Scope discovery to the configured project.** A provider can host many projects/boards; the
-selected one is `ADLC_TASK_PROJECT` (e.g. a Jira project key). Every discovery query MUST be
-filtered to it (e.g. Jira JQL `project = <ADLC_TASK_PROJECT>`). If `ADLC_TASK_PROJECT` is unset,
-stop and have the user pick one (list projects via the provider) before discovering — do not
-pull from all projects.
+selected one is `ADLC_TASK_PROJECT` (a ClickUp List id, a Jira project key, …). Every
+discovery query MUST be filtered to it. If `ADLC_TASK_PROJECT` is unset, stop and have the
+user pick one (list projects via the provider) before discovering — do not pull from all
+projects.
+
+## Provider recipes
+`ADLC_TASK_PROVIDER` says which tracker this is:
+
+| Provider | Recipe |
+| --- | --- |
+| `clickup` | the `clickup-provider` skill (list, status, comment, subtask tools) |
+| `jira` | Atlassian MCP: projects `getVisibleJiraProjects`; search `searchJiraIssuesUsingJql` with `project = <ADLC_TASK_PROJECT>`; details `getJiraIssue`; comment `addCommentToJiraIssue` (names as used before this change; confirm against the server) |
+| `generic` | discover the server's tools as below |
 
 ## MCP mode (`ADLC_TASK_SOURCE_TYPE=mcp`)
 **The main assistant (acting as manager) calls these tools directly** — MCP tools are not
 available to subagents, so discovery and status-sync must happen in the main loop.
-1. The configured server is named by `ADLC_MCP_SERVER`. **Discover** the tools it exposes;
-   do not assume tool names. Look for tools that: list/search tasks, get task details,
+1. The configured server is named by `ADLC_MCP_SERVER`. **Discover** the tools it exposes
+   and check them against the provider recipe; when they differ, trust the server. Look for tools that: list/search tasks, get task details,
    update status, and add comments/worklog.
 2. Inspect each tool's input schema before calling it. Use only the configured, authorized
    server.

@@ -17,8 +17,10 @@ Report the current state of the kobriz ADLC. Gather from **real sources** only:
 4. For each tracked task, merge-readiness:
    `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/adlc.py merge preflight <task_id> --json`
 5. Provider-side status: in REST mode use `adlc.py tasks list` / `tasks get`; in MCP mode
-   query the configured MCP task tools.
+   query the configured MCP task tools (provider recipe, e.g. `clickup-provider`).
+6. Plans and approvals: `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/adlc.py plan list` — show each
+   plan's state, which approvals it still needs, and which tasks it covers.
 
-Present a concise table: task id, kind, owner agent, branch, local state, provider status,
-ahead/behind, conflicts, pending merge. Call out blocked tasks, test failures, and any
+Present a concise table: task id, plan id + plan state, kind, owner agent, branch, local
+state, provider status, ahead/behind, conflicts, pending merge. Call out blocked tasks, test failures, and any
 retained failed worktrees. Do not change anything — this command is read-only.

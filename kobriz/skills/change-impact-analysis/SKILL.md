@@ -68,12 +68,14 @@ Impact preview — SCRUM-42: <summary>   (base: main @ <short-sha>)
 🟠    src/app.module.ts              → wires AuthModule
 ```
 
-### Gate → comment → proceed
-- **Show the preview and ask the user to approve** before creating the worktree or delegating.
-- **On approval, post the same preview as a comment on the ticket** (MCP comment tool in MCP
-  mode, e.g. Jira `addCommentToJiraIssue`; `adlc.py tasks comment` in REST mode), THEN proceed
-  with worktree + delegation.
-- If the user does not approve, do not proceed with that task.
+### Preview → plan → approval
+- Put each task's affected and impacted files into the plan JSON (`affected_files`,
+  `impacted_files`) — the preview is reviewed and approved **as part of the plan**
+  (`plan-approval` skill), not in a separate round.
+- Once the plan is approved, post each task's preview as a comment on its ticket (MCP
+  comment tool in MCP mode — see the provider recipe, e.g. `clickup-provider`;
+  `adlc.py tasks comment` in REST mode), then proceed with worktree + delegation.
+- A task dropped from the plan during review is not executed.
 
 ## Publishing (post-implementation)
 Attach the post-hoc report to the existing task system via its comment API when supported

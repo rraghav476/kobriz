@@ -7,7 +7,7 @@
     {
       "name": "kobriz",
       "source": "./kobriz",
-      "description": "Agentic Development Life Cycle orchestrator — discovers tasks from your existing MCP/REST ticket system, runs them in isolated git worktrees via specialized agents, validates, and merges through a controlled process."
+      "description": "Agentic Development Life Cycle orchestrator — turns Granola meetings into tracker tasks, plans work from ClickUp or another MCP/REST tracker, gates every plan on human approval, runs tasks in isolated git worktrees via specialized agents, validates, and merges through a controlled process."
     }
   ]
 }

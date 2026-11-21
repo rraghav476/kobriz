@@ -12,7 +12,20 @@ Usage:
     python3 adlc.py tasks get <task_id>
     python3 adlc.py tasks status <task_id> <LIFECYCLE_STATE>
     python3 adlc.py tasks comment <task_id> <text...>
-    python3 adlc.py plan
+    python3 adlc.py plan [build]
+    python3 adlc.py plan create [--file plan.json] [--by name]
+    python3 adlc.py plan revise <plan_id> [--file plan.json] [--by name] [--note text]
+    python3 adlc.py plan show <plan_id> [--markdown]
+    python3 adlc.py plan list
+    python3 adlc.py plan approve <plan_id> --hash <short_hash> --by <name>   # human only
+    python3 adlc.py plan posted <plan_id> --task <id> --status <seen>         # after posting
+    python3 adlc.py plan record-provider-approval <plan_id> --task <id> --status <seen>
+    python3 adlc.py plan verify-provider <plan_id>                           # REST mode
+    python3 adlc.py plan request-changes <plan_id> --note text [--by name]
+    python3 adlc.py plan check <task_id>
+    python3 adlc.py intake check <meeting_id> --title <action item>
+    python3 adlc.py intake record <meeting_id> --title <action item> --task-id <id>
+    python3 adlc.py intake show <meeting_id>
     python3 adlc.py worktree create <task_id> <slug> [--kind backend|frontend] [--agent name]
     python3 adlc.py worktree list
     python3 adlc.py worktree state <task_id> <STATE> [--note text]
@@ -39,8 +52,14 @@ import sys
 # Make sibling modules importable when invoked by absolute path.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import Config, ConfigError, redact_text  # noqa: E402
+from config import Config, ConfigError, atomic_write_json, redact_text  # noqa: E402
 import gitutil  # noqa: E402
+from plan_store import (PlanError, PlanGateError, PlanStore, gate_status,  # noqa: E402
+                        render_markdown, SHORT_HASH_LEN)
+
+# Exit codes: 1 error, 3 merge not done, 4 not configured, 5 connection failed,
+# 6 approval required for a tracker write, 7 plan approval gate refused.
+EXIT_PLAN_GATE = 7
 
 
 def _die(msg: str, code: int = 1) -> "None":
@@ -132,20 +151,30 @@ def cmd_setup_status(cfg: Config, args) -> None:
     _ok({"configured": cfg.is_configured(), "source_type": cfg.source_type,
          "config_file": cfg.config_file, "missing": missing,
          "base_branch": cfg.base_branch, "repository_root": cfg.repository_root,
-         "task_project": cfg.task_project,
+         "task_project": cfg.task_project, "provider": cfg.provider,
+         "plan_approval": {"required": cfg.require_plan_approval, "mode": cfg.plan_approval,
+                           "review_status": cfg.plan_review_status,
+                           "approved_status": cfg.plan_approved_status},
          "needs_setup": not cfg.is_configured()})
 
 
-def _read_setup_payload(args) -> dict:
-    raw = args.data if args.data else sys.stdin.read()
+def _load_json_object(raw: "str | None", label: str) -> dict:
+    """Parse a JSON object from text (``None`` = read stdin); exit cleanly on bad input."""
+    if raw is None:
+        raw = sys.stdin.read()
     if not raw or not raw.strip():
-        _die("setup save expects a JSON object of ADLC_* keys via --data or stdin")
+        _die(f"{label} expects a JSON object (argument or stdin)")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        _die(f"setup payload is not valid JSON: {exc}")
+        _die(f"{label} is not valid JSON: {exc}")
     if not isinstance(data, dict):
-        _die("setup payload must be a JSON object")
+        _die(f"{label} must be a JSON object")
+    return data
+
+
+def _read_setup_payload(args) -> dict:
+    data = _load_json_object(args.data or None, "setup payload")
     # Only accept known ADLC_* keys to avoid writing junk.
     allowed_prefix = "ADLC_"
     bad = [k for k in data if not str(k).startswith(allowed_prefix)]
@@ -234,10 +263,7 @@ def cmd_setup_init_mcp(cfg: Config, args) -> None:
         _die("setup init-mcp needs either --url (HTTP/SSE server) or --command (stdio server)")
 
     servers[args.server] = entry
-    tmp = mcp_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, indent=2, sort_keys=True)
-    os.replace(tmp, mcp_path)
+    atomic_write_json(mcp_path, doc)
 
     cfg_path = save_config_file(
         {"ADLC_TASK_SOURCE_TYPE": "mcp", "ADLC_MCP_SERVER": args.server}, scope=args.scope)
@@ -303,6 +329,119 @@ def cmd_plan(cfg: Config, args) -> None:
     plan = build_plan(tasks, cfg.max_concurrency)
     _ok({"task_count": len(tasks), "max_concurrency": cfg.max_concurrency,
          "plan": plan.to_dict()})
+
+
+def _read_plan_file(path) -> dict:
+    if not path:
+        return _load_json_object(None, "plan")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return _load_json_object(fh.read(), f"plan file {path}")
+    except OSError as exc:
+        _die(f"could not read plan file: {exc}")
+
+
+def _plan_view(cfg: Config, record: dict, markdown: bool = False) -> dict:
+    view = {"plan_id": record["plan_id"], "state": record["state"],
+            "short_hash": record["content_hash"][:SHORT_HASH_LEN],
+            "required_approvals": cfg.required_approvals(),
+            "approvals": record["approvals"],
+            "task_ids": [t["id"] for t in record["content"]["tasks"]],
+            "approval_task_id": record["content"].get("approval_task_id")}
+    if markdown:
+        view["markdown"] = render_markdown(record, cfg)
+    return view
+
+
+def _ok_plan(cfg: Config, record: dict, markdown: bool = False, **extra) -> None:
+    _ok({"plan": _plan_view(cfg, record, markdown), **extra})
+
+
+def cmd_plan_create(cfg: Config, args) -> None:
+    record = PlanStore(cfg).create(_read_plan_file(args.file), by=args.by or "")
+    _ok_plan(cfg, record, markdown=True)
+
+
+def cmd_plan_revise(cfg: Config, args) -> None:
+    record = PlanStore(cfg).revise(args.plan_id, _read_plan_file(args.file),
+                                   by=args.by or "", note=args.note or "")
+    _ok_plan(cfg, record, markdown=True)
+
+
+def cmd_plan_show(cfg: Config, args) -> None:
+    record = PlanStore(cfg).get(args.plan_id)
+    if args.markdown:
+        print(render_markdown(record, cfg))
+        return
+    _ok_plan(cfg, record, markdown=True, history=record.get("history", []))
+
+
+def cmd_plan_list(cfg: Config, args) -> None:
+    _ok({"plans": [_plan_view(cfg, r) for r in PlanStore(cfg).all()]})
+
+
+def cmd_plan_approve(cfg: Config, args) -> None:
+    _ok_plan(cfg, PlanStore(cfg).approve_session(args.plan_id, args.hash, args.by))
+
+
+def cmd_plan_record_provider(cfg: Config, args) -> None:
+    _ok_plan(cfg, PlanStore(cfg).record_provider_approval(
+        args.plan_id, args.task, args.status, by=args.by or "",
+        evidence=args.evidence or "", source=args.source or ""))
+
+
+def cmd_plan_verify_provider(cfg: Config, args) -> None:
+    """REST mode: read the approval task's status straight from the tracker and record it."""
+    client = _require_rest(cfg)
+    store = PlanStore(cfg)
+    task_id = str(store.get(args.plan_id)["content"].get("approval_task_id", ""))
+    if not task_id:
+        _die(f"{args.plan_id} has no approval_task_id")
+    status = client.get_task(task_id).status
+    _ok_plan(cfg, store.record_provider_approval(args.plan_id, task_id, str(status),
+                                                 evidence="read via REST", source="rest"))
+
+
+def cmd_plan_posted(cfg: Config, args) -> None:
+    _ok_plan(cfg, PlanStore(cfg).record_posted(args.plan_id, args.task, args.status,
+                                               evidence=args.evidence or ""))
+
+
+def cmd_plan_request_changes(cfg: Config, args) -> None:
+    _ok_plan(cfg, PlanStore(cfg).request_changes(args.plan_id, by=args.by or "",
+                                                 note=args.note))
+
+
+def cmd_plan_check(cfg: Config, args) -> None:
+    result = gate_status(cfg, args.task_id)
+    if not result["ok"]:
+        print(json.dumps({"ok": False, "task_id": args.task_id, **result}, indent=2))
+        sys.exit(EXIT_PLAN_GATE)
+    _ok({"task_id": args.task_id, **result})
+
+
+# -- intake ---------------------------------------------------------------------
+
+def cmd_intake_check(cfg: Config, args) -> None:
+    from intake_store import IntakeStore, draft_key
+    entry = IntakeStore(cfg).check(args.meeting_id, args.title)
+    _ok({"meeting_id": args.meeting_id, "key": draft_key(args.title),
+         "already_created": bool(entry), "entry": entry})
+
+
+def cmd_intake_record(cfg: Config, args) -> None:
+    from intake_store import IntakeStore
+    try:
+        entry = IntakeStore(cfg).record(args.meeting_id, args.title, args.task_id,
+                                        meeting_title=args.meeting_title or "")
+    except ValueError as exc:
+        _die(str(exc))
+    _ok({"meeting_id": args.meeting_id, "entry": entry})
+
+
+def cmd_intake_show(cfg: Config, args) -> None:
+    from intake_store import IntakeStore
+    _ok({"intake": IntakeStore(cfg).show(args.meeting_id)})
 
 
 # -- worktree -------------------------------------------------------------------
@@ -426,7 +565,58 @@ def build_parser() -> argparse.ArgumentParser:
     cs.add_argument("--confirm", action="store_true", help="required; only after user approval")
     cs.set_defaults(func=cmd_tasks_create_subtask)
 
-    sub.add_parser("plan").set_defaults(func=cmd_plan, group="plan", cmd=None)
+    plan_parser = sub.add_parser("plan")
+    plan_parser.set_defaults(func=cmd_plan)
+    pl = plan_parser.add_subparsers(dest="cmd")
+
+    def plan_cmd(name, func, *, plan_id=True, by=False, **kw):
+        sp = pl.add_parser(name, **kw)
+        if plan_id:
+            sp.add_argument("plan_id")
+        if by:
+            sp.add_argument("--by")
+        sp.set_defaults(func=func)
+        return sp
+
+    pl.add_parser("build").set_defaults(func=cmd_plan)
+    plan_cmd("create", cmd_plan_create, plan_id=False, by=True).add_argument("--file")
+    revise = plan_cmd("revise", cmd_plan_revise, by=True)
+    revise.add_argument("--file")
+    revise.add_argument("--note")
+    plan_cmd("show", cmd_plan_show).add_argument("--markdown", action="store_true")
+    plan_cmd("list", cmd_plan_list, plan_id=False)
+    approve = plan_cmd("approve", cmd_plan_approve,
+                       help="human only: approve the version with this hash")
+    approve.add_argument("--hash", required=True)
+    approve.add_argument("--by", required=True)
+    provider = plan_cmd("record-provider-approval", cmd_plan_record_provider, by=True)
+    provider.add_argument("--task", required=True)
+    provider.add_argument("--status", required=True)
+    provider.add_argument("--evidence")
+    provider.add_argument("--source")
+    posted = plan_cmd("posted", cmd_plan_posted)
+    posted.add_argument("--task", required=True)
+    posted.add_argument("--status", required=True)
+    posted.add_argument("--evidence")
+    plan_cmd("verify-provider", cmd_plan_verify_provider)
+    plan_cmd("request-changes", cmd_plan_request_changes,
+             by=True).add_argument("--note", required=True)
+    plan_cmd("check", cmd_plan_check, plan_id=False).add_argument("task_id")
+
+    it = sub.add_parser("intake").add_subparsers(dest="cmd", required=True)
+    ic = it.add_parser("check")
+    ic.add_argument("meeting_id")
+    ic.add_argument("--title", required=True)
+    ic.set_defaults(func=cmd_intake_check)
+    ir = it.add_parser("record")
+    ir.add_argument("meeting_id")
+    ir.add_argument("--title", required=True)
+    ir.add_argument("--task-id", required=True)
+    ir.add_argument("--meeting-title")
+    ir.set_defaults(func=cmd_intake_record)
+    ish = it.add_parser("show")
+    ish.add_argument("meeting_id")
+    ish.set_defaults(func=cmd_intake_show)
 
     wt = sub.add_parser("worktree").add_subparsers(dest="cmd", required=True)
     wc = wt.add_parser("create"); wc.add_argument("task_id"); wc.add_argument("slug")
@@ -459,7 +649,9 @@ def main(argv=None) -> None:
         _die(f"Configuration error: {exc}")
     try:
         args.func(cfg, args)
-    except (ConfigError, gitutil.GitError) as exc:
+    except PlanGateError as exc:
+        _die(str(exc), code=EXIT_PLAN_GATE)
+    except (ConfigError, gitutil.GitError, PlanError) as exc:
         _die(str(exc))
     except Exception as exc:  # noqa: BLE001 — surface a clean error, never a stack-trace secret leak
         _die(f"{type(exc).__name__}: {exc}")
